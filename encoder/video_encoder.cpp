@@ -166,3 +166,182 @@ void VideoEncoder::close() {
   _impl->close();
 }
 //--------------------------------------------------------------------------------
+
+
+
+
+
+
+# include "video_encoder.h"
+# include "avcodec_api.h"
+# include <iostream>
+
+VideoEncoder::~VideoEncoder() {
+  close();
+}
+
+bool VideoEncoder::encode_frame(uint8_t *data_ptr, uint64_t size) {return false;}
+void VideoEncoder::close() {}
+
+inline void fill_data(AVFrame **frame_ptr, unsigned width, unsigned height, int i) {
+  AVFrame *const p = *frame_ptr;
+
+  for(int y = 0; y < height; y++)
+    for(int x = 0; x < width; x++)
+        p->data[0][y * p->linesize[0] + x] = x + y + i * 3;
+
+  for(int y = 0; y < height / 2; y++)
+    for(int x = 0; x < width / 2; x++) {
+        p->data[1][y * p->linesize[1] + x] = 128 + y + i * 2;
+        p->data[2][y * p->linesize[2] + x] = 64 + x + i * 5;
+    }
+}
+
+VideoEncoder::VideoEncoder(const std::string &output_file, unsigned width, unsigned height, unsigned fps) {
+  const unsigned seconds = 5;
+  AVFormatContext *fmt_ctx = avformat_alloc_context();
+
+  if(!fmt_ctx)
+    throw std::runtime_error("err");
+
+  fmt_ctx->oformat = av_guess_format(0, output_file.c_str(), 0);
+
+  if(avio_open2(&fmt_ctx->pb, output_file.c_str(), AVIO_FLAG_WRITE, 0, 0) < 0)
+    throw std::runtime_error("err");
+
+  AVCodec *encoder = avcodec_find_encoder_by_name("libx264");
+  AVStream *outst = avformat_new_stream(fmt_ctx, encoder);
+
+  outst->codec->width = width;
+  outst->codec->height = height;
+  outst->codec->pix_fmt = AV_PIX_FMT_YUV420P;
+  outst->codec->bit_rate = 400000;
+  outst->codec->gop_size = 0;
+  //outst->codec->time_base = {1, fps};
+  /*outst->time_base = */
+  outst->codec->time_base = {1, fps};
+
+  if(av_opt_set(outst->codec->priv_data, "preset", "fast", 0) < 0)
+    throw std::runtime_error("err");
+
+  if(av_opt_set(outst->codec->priv_data, "crf", "10", 0) < 0)
+    throw std::runtime_error("err");
+
+  //outst->nb_frames = (fps * seconds);
+
+  if(avcodec_open2(outst->codec, encoder, 0) < 0)
+    throw std::runtime_error("err");
+
+  if(avformat_write_header(fmt_ctx, 0) < 0)
+    throw std::runtime_error("err");
+
+  AVFrame *frame = av_frame_alloc();
+
+  int frame_counter = 0;
+  int counter = 0,
+    counter1 = 0;
+
+  {
+    int got_output, i;
+    if(!frame)
+      throw std::runtime_error("err");
+
+    frame->format = AV_PIX_FMT_YUV420P;
+    frame->width = width;
+    frame->height = height;
+
+    if(av_image_alloc(frame->data, frame->linesize, width, height, AV_PIX_FMT_YUV420P, 32) < 0)
+      throw std::runtime_error("err");
+    
+    int64_t pts = 0;
+    for(int j = 0; j < seconds; ++j) {
+      for(i = 0; i < fps; ++i) {
+        fill_data(&frame, width, height, i);
+
+        //frame->pts = frame_counter++;
+
+        AVPacket pkt;
+        av_init_packet(&pkt);
+        pkt.data = NULL;
+        pkt.size = 0;
+
+        frame->pts = pts;
+        pts += 1;
+
+        if(avcodec_encode_video2(outst->codec, &pkt, frame, &got_output) < 0)
+          throw std::runtime_error("err");
+
+        //if(pkt.pts != AV_NOPTS_VALUE)
+        //  pkt.pts =  av_rescale_q(pkt.pts, outst->codec->time_base, outst->time_base);
+        //
+        //if(pkt.dts != AV_NOPTS_VALUE)
+        //  pkt.dts = av_rescale_q(pkt.dts, outst->codec->time_base, outst->time_base);
+
+       // got_output = 0;
+        if(got_output) {
+          ++counter;
+          
+          av_interleaved_write_frame(fmt_ctx, &pkt);
+          //av_write_frame(fmt_ctx, &pkt);
+          av_free_packet(&pkt);
+        }
+      }
+    }
+
+    av_freep(&frame->data[0]);
+    av_frame_free(&frame);
+
+    for(got_output = 1; got_output; i++) {
+      AVPacket pkt;
+      av_init_packet(&pkt);
+      pkt.data = NULL;
+      pkt.size = 0;
+
+      if(avcodec_encode_video2(outst->codec, &pkt, NULL, &got_output) < 0)
+        throw std::runtime_error("err");
+      
+      if(pkt.pts != AV_NOPTS_VALUE)
+        pkt.pts =  av_rescale_q(pkt.pts, outst->codec->time_base, outst->time_base);
+
+      if(pkt.dts != AV_NOPTS_VALUE)
+        pkt.dts = av_rescale_q(pkt.dts, outst->codec->time_base, outst->time_base);
+
+      if(got_output) {
+        ++counter1;
+
+        av_interleaved_write_frame(fmt_ctx, &pkt);
+        //av_write_frame(fmt_ctx, &pkt);
+        av_free_packet(&pkt);
+      }
+    }
+  }
+
+  if(av_write_trailer(fmt_ctx) < 0)
+    throw std::runtime_error("err");
+
+  avio_close(fmt_ctx->pb);
+  for(int i = 0; i < fmt_ctx->nb_streams; ++i)
+    if(fmt_ctx->streams[i]->codec)
+      avcodec_close(fmt_ctx->streams[i]->codec);
+
+  avformat_free_context(fmt_ctx);
+
+  std::cout << "Frames = " << counter << " Frames2 = " << counter1;
+  std::cout << std::endl;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
